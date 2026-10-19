@@ -83,9 +83,70 @@ _RE_CABANG_START = re.compile(
 )
 
 
+# Footer yang diulang di setiap halaman PDF SLIK, mis.:
+#   "Nomor Laporan 6650297/IDEB/... | Operator ... | Kode Ref. Pengguna ..."
+#   "Posisi data Terakhir September 2026 | LJK 002 - 971 | ... halaman 3 dari 53"
+# Harus dibuang sebelum halaman digabung, supaya tidak menyelip di tengah
+# fasilitas yang terpotong halaman.
+_RE_FOOTER_LINE = re.compile(
+    r"^\s*(?:Nomor\s+Laporan\b.*\|.*"
+    r"|Posisi\s+data\s+Terakhir\b.*"
+    r"|.*\bhalaman\s+\d+\s+dari\s+\d+)\s*$",
+    re.IGNORECASE
+)
+
+# Penanda awal satu fasilitas: baris "Kredit/Pembiayaan" yang berdiri sendiri,
+# diikuti header kolom ("Pelapor Cabang Baki Debet ...") atau baris "NNN - <pelapor>".
+# (Baris ringkasan "Kredit/Pembiayaan Irrevocable L/C Garansi ..." tidak cocok
+# karena ada teks lain di baris yang sama.)
+_RE_FASILITAS_START = re.compile(
+    r"(?m)^Kredit/Pembiayaan[ \t]*\n(?=[ \t]*(?:Pelapor\b|\d+\s+-\s+))"
+)
+
+# Judul bagian lain yang menandai akhir daftar Kredit/Pembiayaan.
+_RE_SECTION_END = re.compile(
+    r"(?m)^(?:Irrevocable L/C|Bank Garansi|Surat Berharga|Fasilitas Lainnya)[ \t]*$"
+)
+
+
 def clean_cid(text):
     """Hapus artefak (cid:N) yang kadang muncul di PDF tertentu."""
     return re.sub(r'\(cid:\d+\)', ' ', text)
+
+
+def strip_footer(text):
+    """Buang baris footer halaman (Nomor Laporan / Posisi data ... halaman N dari M)."""
+    return "\n".join(
+        line for line in text.split("\n") if not _RE_FOOTER_LINE.match(line)
+    )
+
+
+def join_pages(page_texts):
+    """Gabungkan teks semua halaman menjadi satu aliran teks tanpa footer."""
+    return "\n".join(strip_footer(t).strip("\n") for t in page_texts)
+
+
+def split_facilities(full_text):
+    """
+    Pecah aliran teks gabungan menjadi satu potongan teks per fasilitas
+    Kredit/Pembiayaan.
+
+    Satu fasilitas bisa terpotong di batas halaman (header di halaman N, badan
+    data di halaman N+1). Karena itu pemecahan dilakukan pada teks gabungan semua
+    halaman, BUKAN per halaman: setiap potongan berjalan dari penanda
+    "Kredit/Pembiayaan" sampai penanda fasilitas berikutnya.
+    """
+    starts = [m.start() for m in _RE_FASILITAS_START.finditer(full_text)]
+    chunks = []
+    for i, pos in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(full_text)
+        chunk = full_text[pos:end]
+        # Potong di judul bagian lain (Surat Berharga, Garansi, dst.) bila ada
+        m = _RE_SECTION_END.search(chunk)
+        if m:
+            chunk = chunk[:m.start()]
+        chunks.append(chunk)
+    return chunks
 
 
 def parse_tanggal(text):
@@ -119,13 +180,14 @@ def parse_rupiah(text):
 
 
 def parse_persen(text):
-    """Ubah '21 %' → '21%', '21.5 %' → '21.5%'."""
+    """Ubah '21 %' → '21%', '21.5 %' → '21.5%', '22,69%' → '22.69%'."""
     if not text or not text.strip():
         return ""
-    s = text.strip().replace(" ", "")
-    if not s.endswith("%"):
-        s += "%"
-    return s
+    s = text.strip().replace(" ", "").rstrip("%").strip(".,")
+    # Sebagian PDF SLIK memakai koma desimal ("22,69"): samakan ke titik.
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    return s + "%"
 
 
 # ─────────────────────── Identitas Nasabah ───────────────────────
@@ -178,7 +240,7 @@ def extract_identitas(pdf):
 
 # ─────────────────── Ringkasan Fasilitas ────────────────────────
 
-def extract_total_baki_debet(pdf):
+def extract_total_baki_debet(pdf, page_texts=None):
     """
     Ekstrak Total Baki Debet Kredit/Pembiayaan dari section Ringkasan Fasilitas.
 
@@ -189,8 +251,10 @@ def extract_total_baki_debet(pdf):
     Kolom pertama (index 1) selalu Kredit/Pembiayaan — ini yang kita ambil.
     Kolom terakhir adalah Total — berguna sebagai fallback.
     """
-    for page in pdf.pages:
-        text = clean_cid(page.extract_text() or "")
+    if page_texts is None:
+        page_texts = [clean_cid(p.extract_text() or "") for p in pdf.pages]
+
+    for text in page_texts:
         if "Ringkasan Fasilitas" not in text:
             continue
         if "Baki Debet" not in text:
@@ -204,6 +268,21 @@ def extract_total_baki_debet(pdf):
                 # Kolom pertama = Kredit/Pembiayaan
                 kredit_val = parse_rupiah("Rp " + nums[0])
                 return kredit_val
+
+    # Cadangan: tabel Ringkasan terpotong halaman (judul di satu halaman, angka
+    # di halaman berikutnya) → cari pada teks gabungan, sebelum fasilitas pertama.
+    joined = join_pages(page_texts)
+    idx = joined.find("Ringkasan Fasilitas")
+    if idx >= 0:
+        sub = joined[idx:]
+        first = _RE_FASILITAS_START.search(sub)
+        if first:
+            sub = sub[:first.start()]
+        m = re.search(r"Baki Debet\s+((\d[\d.,]*(?:\s+\d[\d.,]*)*))", sub)
+        if m:
+            nums = re.findall(r"[\d.,]+", m.group(1))
+            if nums:
+                return parse_rupiah("Rp " + nums[0])
     return 0
 
 
@@ -320,8 +399,63 @@ def _strip_cabang(name):
         cut = cabang_m.start()
         # Jika match dimulai dengan spasi (bukan awal string), potong di spasi itu
         return name[:cut].strip()
+    # Nama badan usaha terbuka selalu berakhir "Tbk": teks sesudahnya adalah cabang
+    # (mis. "PT Woori Finance Indonesia Tbk Batavia Prosperindo Finance").
+    # Dikecualikan untuk nama berformat d/h ("... Tbk d/h <nama lama>").
+    tbk_m = re.search(r"\bTbk\.?(?=\s|$)", name)
+    if tbk_m and " d/h " not in name.lower():
+        return name[:tbk_m.end()].strip()
     # Fallback: potong di suffix hukum terakhir
     return _cut_at_last_legal_suffix(name)
+
+
+def _extract_pelapor_wrapped(lines, bank_idx):
+    """
+    Nama pelapor yang membungkus ke beberapa baris. Kolom Pelapor menempati
+    baris sebelum DAN sesudah baris yang memuat cabang + "Rp ...", mis.:
+
+        600614 - PT. Bank Perekonomian Rakyat      <- awal nama pelapor
+        KC Maos Rp 0,00 08 Juli 2022               <- cabang + baki debet
+        Gunung Slamet                              <- lanjutan nama pelapor
+
+    Baris tengah (cabang) dibuang; baris sebelum dan sesudahnya digabung.
+    """
+    first = re.sub(r"^\s*\d+\s+-\s+", "", lines[bank_idx]).strip()
+
+    rp_idx = -1
+    for j in range(bank_idx + 1, min(bank_idx + 4, len(lines))):
+        if _RE_CALENDAR.match(lines[j].strip()):
+            break
+        if re.search(r"(?:^|\s)Rp\s+[\d.,]+", lines[j]):
+            rp_idx = j
+            break
+
+    if rp_idx < 0:
+        # Struktur tidak dikenali: lebih baik nama sebagian daripada kosong
+        return _strip_cabang(first)
+
+    pre = [first] + [ln.strip() for ln in lines[bank_idx + 1:rp_idx] if ln.strip()]
+
+    # Lanjutan nama: baris sesudah baris "Rp ..." sampai baris kalender/kualitas
+    post = []
+    for ln in lines[rp_idx + 1:rp_idx + 3]:
+        s = ln.strip()
+        if (not s or _RE_CALENDAR.match(s) or re.match(r"Kualitas\b", s)
+                or re.match(r"\d+\s+-\s+", s)):
+            break
+        post.append(s)
+
+    return _dedupe_tail(" ".join(pre + post))
+
+
+def _dedupe_tail(pelapor):
+    """Hilangkan duplikasi segmen di akhir nama (mis. 'Auto Finance Auto Finance')."""
+    words = pelapor.split()
+    n = len(words)
+    for half in range(n // 2, 1, -1):
+        if words[n - half:] == words[n - 2 * half:n - half]:
+            return " ".join(words[:n - half]).strip()
+    return pelapor.strip()
 
 
 def extract_pelapor(lines):
@@ -349,8 +483,12 @@ def extract_pelapor(lines):
     # Ambil teks antara "NNN - " dan " Rp "
     m = re.match(r"\s*\d+\s+-\s+(.+?)\s+Rp\s+", bank_line)
     if not m:
-        return ""
+        # Nama pelapor membungkus ke beberapa baris dan baris "Rp ..." ada di
+        # baris berikutnya (bukan baris pertama).
+        return _extract_pelapor_wrapped(lines, bank_line_idx)
     full = m.group(1).strip()
+    # Teks PDF kadang menempelkan "Tbk" dengan cabang tanpa spasi ("TbkBNI KC ...")
+    full = re.sub(r"(?<=\bTbk)(?=[A-Z])", " ", full)
 
     # Periksa next line: lanjutan nama atau kalender?
     next_line = ""
@@ -419,8 +557,17 @@ def parse_facility_page(raw_text):
 
     # ── Baki Debet (dari baris header atas halaman) ──
     # Format: "NNN - Nama Bank   CABANG   Rp xxx,xx   DD Bln YYYY"
+    # Dibaca dari blok header saja (sebelum baris kalender histori), supaya tidak
+    # pernah mengambil angka "Rp" dari badan data fasilitas.
     baki_debet = 0
-    m = re.search(r"Rp\s+([\d.,]+)\s+\d{2}\s+\w+\s+\d{4}", text)
+    header_lines = []
+    for ln in lines:
+        if _RE_CALENDAR.match(ln.strip()):
+            break
+        header_lines.append(ln)
+    header_text = "\n".join(header_lines)
+    m = (re.search(r"Rp\s+([\d.,]+)\s+\d{2}\s+\w+\s+\d{4}", header_text)
+         or re.search(r"Rp\s+([\d.,]+)", header_text))
     if m:
         baki_debet = parse_rupiah("Rp " + m.group(1))
 
@@ -476,7 +623,7 @@ def parse_facility_page(raw_text):
 
     # ── Suku Bunga / Imbalan ──
     rate = ""
-    m = re.search(r"Suku Bunga/Imbalan\s+([\d.]+)\s*%?", text)
+    m = re.search(r"Suku Bunga/Imbalan\s+([\d.,]+)\s*%?", text)
     if m:
         rate = parse_persen(m.group(1))
 
@@ -542,63 +689,55 @@ def parse_slik(pdf_path):
         else:
             print("\n  [INFO] Halaman identitas nasabah tidak ditemukan (PDF parsial).")
 
+        # Teks tiap halaman diekstrak sekali saja, lalu dipakai ulang
+        page_texts = [clean_cid(p.extract_text() or "") for p in pdf.pages]
+
         # 2. Total Baki Debet ringkasan
-        total_baki_ringkasan = extract_total_baki_debet(pdf)
+        total_baki_ringkasan = extract_total_baki_debet(pdf, page_texts)
         if total_baki_ringkasan:
             print("\n  Total Baki Debet (Ringkasan): Rp {:,.0f}".format(total_baki_ringkasan))
 
-        # 3. Parse halaman Kredit/Pembiayaan
-        # Setiap halaman bisa berisi:
-        #   (a) Satu fasilitas murni (baris pertama = "Kredit/Pembiayaan")
-        #   (b) Fasilitas embedded di halaman lain (mis. setelah Ringkasan Fasilitas)
-        #       → "Kredit/Pembiayaan" muncul di tengah halaman
-        fasilitas_list = []
-        kredit_page_count = 0
+        # 3. Parse fasilitas Kredit/Pembiayaan
+        # Fasilitas dipecah dari teks GABUNGAN semua halaman (footer dibuang),
+        # bukan per halaman: satu fasilitas bisa terpotong di batas halaman
+        # (header di halaman N, badan data di halaman N+1), dan satu halaman
+        # bisa memuat banyak fasilitas.
+        chunks = split_facilities(join_pages(page_texts))
+        fasilitas_list = [parse_facility_page(c) for c in chunks]
 
-        for page in pdf.pages:
-            raw = page.extract_text() or ""
-            text = clean_cid(raw)
-            if not text.strip():
-                continue
-
-            lines = text.strip().split("\n")
-            first_line = lines[0].strip()
-
-            if first_line == "Kredit/Pembiayaan":
-                # Kasus (a): halaman murni fasilitas
-                kredit_page_count += 1
-                facility = parse_facility_page(raw)
-                fasilitas_list.append(facility)
-
-            elif "Kredit/Pembiayaan" in text:
-                # Kasus (b): fasilitas embedded di halaman lain
-                # Cari posisi "Kredit/Pembiayaan" di teks dan ambil sub-teks dari situ
-                # Bisa ada lebih dari satu fasilitas per halaman (jarang, tapi mungkin)
-                split_positions = [m.start() for m in re.finditer(
-                    r"(?:^|\n)Kredit/Pembiayaan\n", text
-                )]
-                for pos in split_positions:
-                    # Ambil sub-teks mulai dari "Kredit/Pembiayaan"
-                    sub_text = text[pos:].lstrip("\n")
-                    kredit_page_count += 1
-                    facility = parse_facility_page(sub_text)
-                    fasilitas_list.append(facility)
-
-        print("\n  Halaman Kredit/Pembiayaan  : {}".format(kredit_page_count))
-        print("  Fasilitas berhasil di-parse: {}".format(len(fasilitas_list)))
+        print("\n  Fasilitas Kredit/Pembiayaan terdeteksi: {}".format(len(chunks)))
+        print("  Fasilitas berhasil di-parse           : {}".format(len(fasilitas_list)))
 
         # 4. Verifikasi (hanya jika PDF lengkap)
         print("\n" + "-" * 60)
         print("  VERIFIKASI")
         print("-" * 60)
 
-        if len(fasilitas_list) == kredit_page_count:
-            print("  [OK] Jumlah fasilitas ({}) sesuai dengan jumlah halaman ({})".format(
-                len(fasilitas_list), kredit_page_count))
+        # 4a. Setiap fasilitas harus punya badan data lengkap ("No Rekening" ...
+        #     "Penjamin"). Jika tidak, halaman sumber kemungkinan hilang/rusak.
+        tanpa_badan = [i for i, c in enumerate(chunks, start=1)
+                       if not re.search(r"(?m)^No\s+Rekening\b", c)]
+        if not chunks:
+            print("  [WARNING] Tidak ada fasilitas Kredit/Pembiayaan yang terdeteksi di PDF ini.")
+        elif not tanpa_badan:
+            print("  [OK] Semua {} fasilitas memiliki badan data lengkap".format(len(chunks)))
         else:
-            print("  [WARNING] Jumlah fasilitas ({}) TIDAK SAMA dengan "
-                  "jumlah halaman Kredit/Pembiayaan ({})".format(
-                      len(fasilitas_list), kredit_page_count))
+            print("  [WARNING] {} fasilitas TANPA badan data (urutan ke-{}). "
+                  "PDF kemungkinan tidak lengkap.".format(
+                      len(tanpa_badan), ", ".join(map(str, tanpa_badan))))
+
+        # 4b. Field yang kosong (tidak terbaca) per fasilitas.
+        wajib = [("pelapor", "Pelapor"), ("jenis", "Jenis"), ("realisasi", "Realisasi"),
+                 ("jatuh_tempo", "Jatuh Tempo"), ("kol", "Kol"), ("kondisi", "Kondisi")]
+        ada_kosong = 0
+        for i, fac in enumerate(fasilitas_list, start=1):
+            kosong = [label for key, label in wajib if not fac.get(key)]
+            if kosong:
+                ada_kosong += 1
+                print("  [WARNING] Fasilitas ke-{} ({}) kolom kosong: {}".format(
+                    i, fac.get("pelapor") or "?", ", ".join(kosong)))
+        if not ada_kosong:
+            print("  [OK] Semua kolom wajib terisi di seluruh fasilitas")
 
         if total_baki_ringkasan:
             total_baki_parsed = sum(f["baki_debet"] for f in fasilitas_list)
