@@ -18,6 +18,12 @@ echo   Butuh koneksi internet. Lama proses sekitar 3-10 menit.
 echo   Jangan tutup jendela ini sampai muncul tulisan SELESAI.
 echo.
 
+REM Folder kerja build sengaja di TEMP (path pendek): venv di dalam folder
+REM aplikasi bisa melewati batas 260 karakter path Windows bila folder
+REM aplikasi sudah dalam (mis. hasil ekstrak ZIP GitHub / OneDrive), dan
+REM itu membuat sebagian library gagal dimuat saat build.
+set "WORK=%TEMP%\slik_parser_build"
+
 REM ============================================================
 REM  0. Pastikan semua file sumber ada (ZIP sudah diekstrak)
 REM ============================================================
@@ -75,7 +81,6 @@ REM ============================================================
 REM  2. Virtual environment sementara + library terkunci versinya
 REM ============================================================
 echo [2/4] Memasang library (pdfplumber, openpyxl, tkinterdnd2, pyinstaller) ...
-set "WORK=%~dp0_build_tmp"
 if exist "%WORK%" rmdir /s /q "%WORK%"
 !PY! -m venv "%WORK%\venv"
 if errorlevel 1 (
@@ -163,7 +168,7 @@ if not errorlevel 1 set "PY=%*"
 exit /b 0
 
 :CLEANUP
-if exist "%~dp0_build_tmp" rmdir /s /q "%~dp0_build_tmp"
+if exist "%WORK%" rmdir /s /q "%WORK%"
 if exist "%~dp0__pycache__" rmdir /s /q "%~dp0__pycache__"
 exit /b 0
 
