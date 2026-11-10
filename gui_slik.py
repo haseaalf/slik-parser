@@ -46,7 +46,7 @@ except ImportError:
     sys.exit(1)
 
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 
 try:
     import slik_parser
@@ -73,6 +73,8 @@ CARD = "#FFFFFF"         # latar kartu
 OK_GREEN = "#1E7B34"
 WARN_ORANGE = "#9A5B00"
 FONT = "Segoe UI"
+
+STATUS_WAITING = "Menunggu file. Seret PDF ke kotak di atas atau klik untuk memilih."
 
 
 def resource_path(relative_path):
@@ -426,8 +428,7 @@ class App:
         left = tk.Frame(bar, bg=BG)
         left.pack(side="left", fill="x", expand=True, padx=(0, S(16)))
         self.status_label = tk.Label(
-            left, text="Menunggu file. Seret PDF ke kotak di atas atau klik untuk memilih.",
-            bg=BG, fg=INK, font=(FONT, 10), anchor="w",
+            left, text=STATUS_WAITING, bg=BG, fg=INK, font=(FONT, 10), anchor="w",
         )
         self.status_label.pack(fill="x")
         self.progress = ttk.Progressbar(
@@ -444,8 +445,14 @@ class App:
         head.pack(fill="x", padx=S(12), pady=(S(8), S(6)))
         tk.Label(head, text="Hasil", bg=CARD, fg=GREY,
                  font=(FONT, 11, "bold")).pack(side="left")
+        self.reset_btn = FlatButton(
+            head, text="Reset", command=self.reset_results, kind="secondary",
+            font=(FONT, 9, "bold"), padx=S(12), pady=S(3),
+        )
+        self.reset_btn.set_enabled(False)
+        self.reset_btn.pack(side="right")
         self.summary_label = tk.Label(head, text="", bg=CARD, fg=MUTED, font=(FONT, 9))
-        self.summary_label.pack(side="right")
+        self.summary_label.pack(side="right", padx=(0, S(10)))
         tk.Frame(box, bg=LINE, height=1).pack(fill="x")
 
         list_frame = tk.Frame(box, bg=CARD)
@@ -473,13 +480,15 @@ class App:
         self.results_canvas.pack(side="left", fill="both", expand=True)
         results_scrollbar.pack(side="right", fill="y")
         self._bind_mousewheel(list_frame, self.results_canvas)
+        self._show_empty_label()
 
+    def _show_empty_label(self):
         self.empty_label = tk.Label(
             self.results_inner,
             text="Belum ada file diproses. Hasil konversi akan muncul di sini.",
             bg=CARD, fg=MUTED, font=(FONT, 10),
         )
-        self.empty_label.pack(pady=S(18))
+        self.empty_label.pack(pady=self.S(18))
 
     def _bind_mousewheel(self, area, canvas):
         def on_wheel(event):
@@ -610,6 +619,7 @@ class App:
         self.progress.config(maximum=self.batch_total, value=0)
         self.status_label.config(text="Memproses {} file...".format(len(pdf_paths)))
         self._draw_drop_zone()
+        self._update_reset_state()
         threading.Thread(
             target=process_files,
             args=(pdf_paths, self.out_queue),
@@ -634,6 +644,7 @@ class App:
                 elif kind == "done":
                     self.processing = False
                     self._draw_drop_zone()
+                    self._update_reset_state()
                     self.status_label.config(
                         text="Selesai. Total {} file diproses: {} berhasil, {} gagal.".format(
                             self.total_processed, self.count_ok, self.count_fail)
@@ -694,6 +705,47 @@ class App:
         tk.Frame(row, bg="#ECECEC", height=1).pack(fill="x")
         self.summary_label.config(
             text="{} berhasil  ·  {} gagal".format(self.count_ok, self.count_fail))
+        self._update_reset_state()
+
+    # ── Reset: kosongkan daftar hasil, log, dan file hasil sementara ──
+    def _update_reset_state(self):
+        """Reset hanya aktif bila ada hasil DAN tidak sedang memproses, supaya
+        hasil yang masih masuk dari thread background tidak ikut terhapus."""
+        self.reset_btn.set_enabled(not self.processing and self.total_processed > 0)
+
+    def reset_results(self):
+        if self.processing or not self.total_processed:
+            return
+        ok = messagebox.askyesno(
+            "Reset daftar hasil",
+            "Hapus semua daftar hasil dan log proses?\n\n"
+            "File Excel hasil yang belum diunduh akan ikut terhapus dan "
+            "tidak bisa dikembalikan.",
+            icon="warning", default="no", parent=self.root,
+        )
+        if not ok:
+            return
+
+        # Hapus file .xlsx di folder staging (hanya yang memang di dalam staging)
+        for r in self.results:
+            staged_dir = os.path.dirname(r["staged_path"])
+            if os.path.commonpath([staged_dir, SESSION_TEMP_DIR]) == SESSION_TEMP_DIR:
+                shutil.rmtree(staged_dir, ignore_errors=True)
+
+        for child in self.results_inner.winfo_children():
+            child.destroy()
+        self.results = []
+        self.total_processed = self.count_ok = self.count_fail = 0
+        self.batch_total = self.batch_done = 0
+
+        self.summary_label.config(text="")
+        self.download_all_btn.set_enabled(False)
+        self.progress.config(maximum=1, value=0)
+        self.status_label.config(text=STATUS_WAITING)
+        self.log_text.delete("1.0", "end")
+        self._show_empty_label()
+        self.results_canvas.yview_moveto(0)
+        self._update_reset_state()
 
     # ── Unduh satu file hasil ──
     def download_single(self, result):
