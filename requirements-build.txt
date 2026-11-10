@@ -1,0 +1,26 @@
+# Versi library untuk build SLIK_Parser_GUI.exe (Python 3.12).
+# SEMUA versi dikunci supaya exe yang di-build di laptop mana pun identik dengan
+# versi yang sudah diuji: perubahan versi pdfplumber/pdfminer.six bisa mengubah
+# cara teks PDF diekstrak, dan versi PyInstaller/hook memengaruhi isi exe.
+
+# Library utama
+pdfplumber==0.11.10
+pdfminer.six==20260107
+openpyxl==3.1.5
+pillow==13.0.0
+tkinterdnd2==0.7.0
+pyinstaller==6.22.3
+
+# Dependensi turunan
+altgraph==0.17.5
+cffi==2.1.1
+charset-normalizer==3.5.2
+cryptography==50.0.2
+et_xmlfile==2.0.0
+packaging==26.3
+pefile==2024.8.26
+pycparser==3.12
+pyinstaller-hooks-contrib==2026.9
+pypdfium2==5.14.0
+pywin32-ctypes==0.2.3
+setuptools==84.2.1

@@ -1,0 +1,20 @@
+﻿# Data nasabah: laporan SLIK berisi NIK dan data kredit pribadi. JANGAN di-commit.
+*.pdf
+*.xlsx
+*.xls
+~$*
+hasil_baru/
+gui_slik.zip
+
+# Python / build
+__pycache__/
+*.pyc
+.buildenv/
+_build_tmp/
+build/
+dist/
+*.spec
+SLIK_Parser_GUI.exe
+
+# Claude Code
+.claude/
