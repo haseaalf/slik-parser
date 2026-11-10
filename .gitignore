@@ -10,6 +10,7 @@ gui_slik.zip
 __pycache__/
 *.pyc
 .buildenv/
+_build_tmp/
 build/
 dist/
 *.spec

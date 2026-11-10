@@ -1,0 +1,6 @@
+# File .bat WAJIB berakhiran CRLF (cmd.exe salah membaca label goto/call pada
+# file berakhiran LF). Disimpan apa adanya (-text) supaya ZIP unduhan GitHub
+# juga berisi CRLF.
+*.bat -text
+*.ico binary
+*.png binary
